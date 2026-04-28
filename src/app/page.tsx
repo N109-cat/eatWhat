@@ -1,13 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ChangeEvent, ClipboardEvent, DragEvent, FormEvent, KeyboardEvent } from "react";
 import {
-  CalendarDays,
   CheckCircle2,
   CircleDot,
+  ClipboardPaste,
   ClipboardPenLine,
   Filter,
+  FileImage,
+  ImagePlus,
   Link2,
+  LoaderCircle,
   MapPin,
   Pencil,
   Plus,
@@ -22,18 +26,56 @@ import {
   X
 } from "lucide-react";
 import { extractFoodNote } from "@/lib/extractor";
-import type { FoodRecord, FoodRecordDraft, FoodRecordStatus } from "@/lib/types";
+import type {
+  ExtractedFoodNote,
+  FoodRecord,
+  FoodRecordDraft,
+  FoodRecordLocationScope,
+  FoodRecordRevisitWish,
+  FoodRecordStatus
+} from "@/lib/types";
 
 const STORAGE_KEY = "eat-what.food-records.v1";
 const ALL = "全部";
+const DEFAULT_SHOP_TYPES = ["韩餐", "日料", "火锅", "烧烤", "咖啡", "甜品", "粤菜", "其他"];
 const NOTE_COLORS = ["note-yellow", "note-mint", "note-blue", "note-pink", "note-cream", "note-lavender"];
 const FIXTURE_TYPES = ["tape", "pin", "sticker"] as const;
-const DISTANCE_FILTERS = [
-  { label: "不限", value: "all" },
-  { label: "500m", value: "500m" },
-  { label: "1km", value: "1km" },
-  { label: "自定义", value: "custom" }
+const VIEW_MODE_FILTERS = [
+  { label: "待打卡墙", value: "want" },
+  { label: "已打卡收藏夹", value: "visited" },
+  { label: "全部记录", value: "all" }
 ] as const;
+const VIEW_MODE_TITLES: Record<ViewMode, string> = {
+  all: "全部记录",
+  want: "待打卡墙",
+  visited: "已打卡收藏夹"
+};
+const LOCATION_SCOPE_FILTERS = [
+  { label: "全部", value: "all" },
+  { label: "附近随吃", value: "nearby" },
+  { label: "专门出门", value: "destination" }
+] as const;
+const LOCATION_SCOPE_OPTIONS = [
+  { label: "待补充", value: "" },
+  { label: "附近随吃", value: "nearby" },
+  { label: "专门出门", value: "destination" }
+] as const;
+const LOCATION_SCOPE_LABELS: Record<FoodRecordLocationScope, string> = {
+  "": "待补充",
+  nearby: "附近随吃",
+  destination: "专门出门"
+};
+const REVISIT_WISH_OPTIONS = [
+  { label: "想二刷", value: "yes" },
+  { label: "看情况", value: "maybe" },
+  { label: "不二刷", value: "no" }
+] as const;
+const REVISIT_WISH_LABELS: Record<FoodRecordRevisitWish, string> = {
+  "": "待补充",
+  yes: "想二刷",
+  maybe: "看情况",
+  no: "不二刷"
+};
 const TIME_FILTERS = [
   { label: "全部", value: "all" },
   { label: "本周", value: "this-week" },
@@ -41,51 +83,93 @@ const TIME_FILTERS = [
   { label: "自定义", value: "custom" }
 ] as const;
 const ARCHIVE_ANIMATION_MS = 760;
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_MODEL_IMAGE_EDGE = 1120;
+const MAX_MODEL_IMAGE_PIXELS = 900_000;
+const MODEL_IMAGE_QUALITY = 0.78;
+const FALLBACK_MODEL_IMAGE_EDGE = 768;
+const FALLBACK_MODEL_IMAGE_PIXELS = 420_000;
+const FALLBACK_MODEL_IMAGE_QUALITY = 0.66;
+const MAX_MODEL_IMAGE_BASE64_CHARS = 2_400_000;
+const MAX_RAW_TEXT_CHARS = 8000;
 
 type FixtureType = (typeof FIXTURE_TYPES)[number];
-type DistanceFilter = (typeof DISTANCE_FILTERS)[number]["value"];
+type ViewMode = (typeof VIEW_MODE_FILTERS)[number]["value"];
+type LocationScopeFilter = (typeof LOCATION_SCOPE_FILTERS)[number]["value"];
 type TimeFilter = (typeof TIME_FILTERS)[number]["value"];
+type ModelImageVariant = {
+  data: string;
+  label?: string;
+  mediaType: string;
+};
+type ModelImageInput = ModelImageVariant & {
+  variants?: ModelImageVariant[];
+};
+type ExtractFoodNoteApiResponse = {
+  error?: string;
+  note?: ExtractedFoodNote;
+  provider?: "modelscope" | "local";
+  warning?: string;
+};
 
 const emptyDraft: FoodRecordDraft = {
   sourceUrl: "",
   rawText: "",
   shopName: "",
   shopType: "",
+  locationScope: "",
   location: "",
   avgPrice: "",
   recommendedDishes: [],
   intro: "",
   customTags: [],
-  status: "want"
+  status: "want",
+  avoidNotes: "",
+  revisitWish: ""
 };
 
 export default function Home() {
   const [sourceUrl, setSourceUrl] = useState("");
   const [rawText, setRawText] = useState("");
+  const [imagePreviewUrl, setImagePreviewUrl] = useState("");
+  const [imageFileName, setImageFileName] = useState("");
+  const [imageModelInput, setImageModelInput] = useState<ModelImageInput | null>(null);
+  const [imageParseStatus, setImageParseStatus] = useState("");
+  const [imageParseProgress, setImageParseProgress] = useState(0);
+  const [imageParseError, setImageParseError] = useState("");
+  const [isImageParsing, setIsImageParsing] = useState(false);
+  const [isImageDropActive, setIsImageDropActive] = useState(false);
+  const [isAiExtracting, setIsAiExtracting] = useState(false);
+  const [aiExtractNotice, setAiExtractNotice] = useState("");
   const [records, setRecords] = useState<FoodRecord[]>([]);
   const [draft, setDraft] = useState<FoodRecordDraft | null>(null);
+  const [inspectingRecord, setInspectingRecord] = useState<FoodRecord | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedViewMode, setSelectedViewMode] = useState<ViewMode>("all");
   const [selectedType, setSelectedType] = useState(ALL);
   const [selectedTag, setSelectedTag] = useState(ALL);
+  const [selectedLocationScope, setSelectedLocationScope] = useState<LocationScopeFilter>("all");
   const [selectedLocation, setSelectedLocation] = useState(ALL);
-  const [selectedDistance, setSelectedDistance] = useState<DistanceFilter>("all");
-  const [customDistance, setCustomDistance] = useState("");
   const [selectedTime, setSelectedTime] = useState<TimeFilter>("all");
   const [customStartDate, setCustomStartDate] = useState("");
   const [customEndDate, setCustomEndDate] = useState("");
   const [exitingRecordIds, setExitingRecordIds] = useState<string[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageParseRunIdRef = useRef(0);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(STORAGE_KEY);
     if (stored) {
       try {
-        const parsed = JSON.parse(stored) as FoodRecord[];
-        setRecords(parsed);
+        const parsed = JSON.parse(stored) as Partial<FoodRecord>[];
+        setRecords(Array.isArray(parsed) ? parsed.map(normalizeStoredRecord) : []);
       } catch {
         window.localStorage.removeItem(STORAGE_KEY);
       }
     }
+
     setIsLoaded(true);
   }, []);
 
@@ -95,9 +179,32 @@ export default function Home() {
     }
   }, [isLoaded, records]);
 
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrl) {
+        URL.revokeObjectURL(imagePreviewUrl);
+      }
+    };
+  }, [imagePreviewUrl]);
+
+  useEffect(() => {
+    return () => {
+      imageParseRunIdRef.current += 1;
+    };
+  }, []);
+
+  const inspectingRecordId = inspectingRecord?.id ?? null;
+
+  useEffect(() => {
+    if (!inspectingRecordId) return;
+
+    const nextRecord = records.find((record) => record.id === inspectingRecordId);
+    setInspectingRecord(nextRecord ?? null);
+  }, [records, inspectingRecordId]);
+
   const shopTypes = useMemo(() => {
     const values = records.map((record) => record.shopType).filter(Boolean);
-    return [ALL, ...Array.from(new Set(values))];
+    return [ALL, ...Array.from(new Set([...DEFAULT_SHOP_TYPES, ...values]))];
   }, [records]);
 
   const customTags = useMemo(() => {
@@ -114,26 +221,51 @@ export default function Home() {
     return records.filter((record) => {
       const typeMatched = selectedType === ALL || record.shopType === selectedType;
       const tagMatched = selectedTag === ALL || record.customTags.includes(selectedTag);
+      const locationScopeMatched = selectedLocationScope === "all" || record.locationScope === selectedLocationScope;
       const locationMatched = selectedLocation === ALL || record.location === selectedLocation;
-      const distanceMatched = matchesDistanceFilter(record, selectedDistance, customDistance);
       const timeMatched = matchesTimeFilter(record.createdAt, selectedTime, customStartDate, customEndDate);
-      return typeMatched && tagMatched && locationMatched && distanceMatched && timeMatched;
+      const queryMatched = matchesSearchQuery(record, searchQuery);
+
+      return typeMatched && tagMatched && locationScopeMatched && locationMatched && timeMatched && queryMatched;
     });
   }, [
-    customDistance,
     customEndDate,
     customStartDate,
     records,
-    selectedDistance,
     selectedLocation,
+    selectedLocationScope,
+    searchQuery,
     selectedTag,
     selectedTime,
     selectedType
   ]);
 
   const archivedTotal = useMemo(() => records.filter((record) => record.status === "visited").length, [records]);
+  const wantTotal = useMemo(() => records.filter((record) => record.status !== "visited").length, [records]);
+  const revisitTotal = useMemo(
+    () => records.filter((record) => record.status === "visited" && record.revisitWish === "yes").length,
+    [records]
+  );
+  const recentVisitedRecords = useMemo(
+    () =>
+      records
+        .filter((record) => record.status === "visited")
+        .sort((a, b) => {
+          const aTime = new Date(a.visitedAt ?? a.updatedAt).getTime();
+          const bTime = new Date(b.visitedAt ?? b.updatedAt).getTime();
+          return bTime - aTime;
+        })
+        .slice(0, 2),
+    [records]
+  );
 
-  const boardRecords = useMemo(() => filteredRecords.filter((record) => record.status !== "visited"), [filteredRecords]);
+  const boardRecords = useMemo(
+    () =>
+      filteredRecords
+        .filter((record) => record.status !== "visited")
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [filteredRecords]
+  );
 
   const archivedRecords = useMemo(
     () =>
@@ -146,12 +278,9 @@ export default function Home() {
         }),
     [filteredRecords]
   );
+  const isCaptureBusy = isImageParsing || isAiExtracting;
 
-  const groupedRecords = useMemo(() => groupByDate(boardRecords), [boardRecords]);
-
-  function handleExtract(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const extracted = extractFoodNote({ sourceUrl, rawText });
+  function openDraftFromExtracted(extracted: ExtractedFoodNote) {
     setDraft({
       ...emptyDraft,
       ...extracted,
@@ -160,33 +289,193 @@ export default function Home() {
     setEditingId(null);
   }
 
+  function openDraftFromText(nextRawText: string) {
+    const safeRawText = clampText(nextRawText, MAX_RAW_TEXT_CHARS);
+    const extracted = extractFoodNote({ sourceUrl, rawText: safeRawText });
+    openDraftFromExtracted(extracted);
+  }
+
+  async function handleExtract(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const combinedRawText = rawText.trim();
+    if (!sourceUrl.trim() && !combinedRawText.trim() && !imageModelInput) return;
+
+    setIsAiExtracting(true);
+    setAiExtractNotice("");
+
+    try {
+      const response = await fetch("/api/extract-food-note", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceUrl,
+          rawText: combinedRawText,
+          image: imageModelInput
+        })
+      });
+      const data = (await response.json()) as ExtractFoodNoteApiResponse;
+
+      if (!response.ok || !data.note) {
+        throw new Error(data.error || "AI 整理失败");
+      }
+
+      setRawText(data.note.rawText);
+      openDraftFromExtracted(data.note);
+
+      if (data.warning) {
+        setAiExtractNotice(data.warning);
+      }
+    } catch (error) {
+      setAiExtractNotice(`${getAiExtractErrorMessage(error)}，已先使用本地规则整理。`);
+      openDraftFromText(combinedRawText);
+    } finally {
+      setIsAiExtracting(false);
+    }
+  }
+
+  function handleImageInputChange(event: ChangeEvent<HTMLInputElement>) {
+    void handleImageFiles(event.target.files);
+    event.target.value = "";
+  }
+
+  function handleImagePaste(event: ClipboardEvent<HTMLElement>) {
+    const imageFile = getFirstImageFile(event.clipboardData.files) ?? getFirstImageItemFile(event.clipboardData.items);
+    if (!imageFile) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    void parseImageFile(imageFile);
+  }
+
+  function handleImageDragOver(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    setIsImageDropActive(hasImageFile(event.dataTransfer.items));
+  }
+
+  function handleImageDragLeave(event: DragEvent<HTMLElement>) {
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
+
+    setIsImageDropActive(false);
+  }
+
+  function handleImageDrop(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    setIsImageDropActive(false);
+
+    const imageFile = getFirstImageFile(event.dataTransfer.files);
+    if (!imageFile) {
+      setImageParseError("请拖入图片文件。");
+      return;
+    }
+
+    void parseImageFile(imageFile);
+  }
+
+  function handleImageAreaKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+
+    event.preventDefault();
+    fileInputRef.current?.click();
+  }
+
+  async function handleImageFiles(files: FileList | null) {
+    const imageFile = getFirstImageFile(files);
+    if (!imageFile) {
+      setImageParseError("没有找到可识别的图片文件。");
+      return;
+    }
+
+    await parseImageFile(imageFile);
+  }
+
+  async function parseImageFile(file: File) {
+    if (!isImageFile(file)) {
+      setImageParseError("请选择 PNG、JPG、WEBP 等图片文件。");
+      return;
+    }
+
+    if (file.size > MAX_IMAGE_BYTES) {
+      setImageParseError(`图片有点大，建议控制在 ${formatFileSize(MAX_IMAGE_BYTES)} 以内。`);
+      return;
+    }
+
+    const runId = imageParseRunIdRef.current + 1;
+    imageParseRunIdRef.current = runId;
+
+    setImageFileName(file.name || "粘贴图片");
+    setImagePreviewUrl(URL.createObjectURL(file));
+    setImageModelInput(null);
+    setImageParseError("");
+    setAiExtractNotice("");
+    setImageParseProgress(0);
+    setImageParseStatus("正在准备直传给模型的图片");
+    setIsImageParsing(true);
+
+    try {
+      const preparedImage = await prepareImageForModel(file);
+
+      if (imageParseRunIdRef.current !== runId) return;
+
+      if (!preparedImage) {
+        setImageParseError("图片准备失败，请换一张截图再试。");
+        return;
+      }
+
+      setImageModelInput(preparedImage);
+      setImageParseProgress(1);
+      setImageParseStatus("图片已准备好，点击 AI 整理会直接发给模型");
+    } catch (error) {
+      if (imageParseRunIdRef.current !== runId) return;
+
+      setImageParseError(getImagePrepareErrorMessage(error));
+      setImageParseStatus("图片准备失败");
+    } finally {
+      if (imageParseRunIdRef.current === runId) {
+        setIsImageParsing(false);
+      }
+    }
+  }
+
+  function clearImageParse() {
+    imageParseRunIdRef.current += 1;
+    setImagePreviewUrl("");
+    setImageFileName("");
+    setImageModelInput(null);
+    setImageParseStatus("");
+    setImageParseProgress(0);
+    setImageParseError("");
+    setIsImageParsing(false);
+    setIsImageDropActive(false);
+  }
+
   function handleSaveDraft(nextDraft: FoodRecordDraft) {
     const now = new Date().toISOString();
+    const savedDraft = normalizeDraftForSave(nextDraft);
 
     if (editingId) {
       const targetRecord = records.find((record) => record.id === editingId);
-      const shouldAnimateArchive = targetRecord?.status !== "visited" && nextDraft.status === "visited";
+      const shouldAnimateArchive = targetRecord?.status !== "visited" && savedDraft.status === "visited";
       const targetId = editingId;
 
       if (shouldAnimateArchive) {
         setExitingRecordIds((current) => (current.includes(targetId) ? current : [...current, targetId]));
         window.setTimeout(() => {
           setRecords((current) =>
-            current.map((record) => (record.id === targetId ? applyDraftToRecord(record, nextDraft, now) : record))
+            current.map((record) => (record.id === targetId ? applyDraftToRecord(record, savedDraft, now) : record))
           );
           setExitingRecordIds((current) => current.filter((id) => id !== targetId));
         }, ARCHIVE_ANIMATION_MS);
       } else {
         setRecords((current) =>
-          current.map((record) => (record.id === targetId ? applyDraftToRecord(record, nextDraft, now) : record))
+          current.map((record) => (record.id === targetId ? applyDraftToRecord(record, savedDraft, now) : record))
         );
       }
     } else {
       const newRecord: FoodRecord = {
         id: createId(),
-        ...nextDraft,
-        recommendedDishes: cleanList(nextDraft.recommendedDishes),
-        customTags: cleanList(nextDraft.customTags),
+        ...savedDraft,
         createdAt: now,
         updatedAt: now
       };
@@ -200,12 +489,14 @@ export default function Home() {
   }
 
   function handleEdit(record: FoodRecord) {
+    setInspectingRecord(null);
     setEditingId(record.id);
     setDraft({
       sourceUrl: record.sourceUrl,
       rawText: record.rawText,
       shopName: record.shopName,
       shopType: record.shopType,
+      locationScope: record.locationScope,
       location: record.location,
       avgPrice: record.avgPrice,
       recommendedDishes: record.recommendedDishes,
@@ -214,17 +505,21 @@ export default function Home() {
       status: record.status,
       visitedAt: record.visitedAt,
       rating: record.rating,
-      visitNote: record.visitNote
+      visitNote: record.visitNote,
+      avoidNotes: record.avoidNotes,
+      revisitWish: record.revisitWish
     });
   }
 
   function handleVisit(record: FoodRecord) {
+    setInspectingRecord(null);
     setEditingId(record.id);
     setDraft({
       sourceUrl: record.sourceUrl,
       rawText: record.rawText,
       shopName: record.shopName,
       shopType: record.shopType,
+      locationScope: record.locationScope,
       location: record.location,
       avgPrice: record.avgPrice,
       recommendedDishes: record.recommendedDishes,
@@ -233,7 +528,9 @@ export default function Home() {
       status: "visited",
       visitedAt: toDateInputValue(new Date()),
       rating: record.rating ?? 4,
-      visitNote: record.visitNote ?? ""
+      visitNote: record.visitNote ?? "",
+      avoidNotes: record.avoidNotes ?? "",
+      revisitWish: record.revisitWish ?? "maybe"
     });
   }
 
@@ -241,15 +538,17 @@ export default function Home() {
     const confirmed = window.confirm("确定要删除这张便利贴吗？");
     if (confirmed) {
       setRecords((current) => current.filter((record) => record.id !== id));
+      setInspectingRecord((current) => (current?.id === id ? null : current));
     }
   }
 
   function clearFilters() {
+    setSearchQuery("");
+    setSelectedViewMode("all");
     setSelectedType(ALL);
     setSelectedTag(ALL);
+    setSelectedLocationScope("all");
     setSelectedLocation(ALL);
-    setSelectedDistance("all");
-    setCustomDistance("");
     setSelectedTime("all");
     setCustomStartDate("");
     setCustomEndDate("");
@@ -265,7 +564,7 @@ export default function Home() {
           <div>
             <p className="eyebrow">XHS FOOD BOARD</p>
             <h1>想吃便利贴墙</h1>
-            <p className="handwritten-line">把刷到的美食，变成一张待销小票贴起来吧！</p>
+            <p className="handwritten-line">把刷到的美食，变成一张待打卡小票贴起来吧！</p>
           </div>
         </div>
 
@@ -283,49 +582,59 @@ export default function Home() {
               <p className="eyebrow">
                 已取下{archivedTotal}/{records.length}个贴上的小票
               </p>
-              <h2>按添加日期归档</h2>
+              <h2>{VIEW_MODE_TITLES[selectedViewMode]}</h2>
             </div>
-            <div className="record-count">
-              <CircleDot size={16} aria-hidden />
-              {boardRecords.length} / {filteredRecords.length} 张待贴小票
+            <div className="board-actions">
+              <label className="search-field">
+                <Search size={16} aria-hidden />
+                <input
+                  aria-label="搜索店名、菜品、标签、地点或备注"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="搜索店名 / 菜品 / 标签 / 地点"
+                  type="search"
+                />
+              </label>
+              <div className="record-count">
+                <CircleDot size={16} aria-hidden />
+                <span>
+                  待打卡 <strong>{wantTotal}</strong> 家
+                </span>
+                <i aria-hidden />
+                <span>
+                  已打卡 <strong>{archivedTotal}</strong> 家
+                </span>
+              </div>
             </div>
           </div>
 
           <div className="canvas-board">
             <p className="scribble-note scribble-top">today finds / keep the good bites</p>
-            {groupedRecords.length > 0 ? (
-              <div className="date-lanes">
-                {groupedRecords.map(([dateKey, items]) => (
-                  <section className="date-section" key={dateKey}>
-                    <div className="date-label">
-                      <CalendarDays size={18} aria-hidden />
-                      <span>{formatDateLabel(dateKey)}</span>
-                    </div>
-                    <div className="note-grid">
-                      {items.map((record, index) => (
-                        <FoodNote
-                          colorClass={NOTE_COLORS[index % NOTE_COLORS.length]}
-                          fixtureType={getFixtureType(index)}
-                          key={record.id}
-                          record={record}
-                          isExiting={exitingRecordIds.includes(record.id)}
-                          shiftX={getShiftX(index)}
-                          shiftY={getShiftY(index)}
-                          stack={getStack(index)}
-                          tilt={getTilt(index)}
-                          onDelete={handleDelete}
-                          onEdit={handleEdit}
-                          onVisit={handleVisit}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
+            {selectedViewMode === "all" ? (
+              <AllRecordsBoard
+                archivedRecords={archivedRecords}
+                boardRecords={boardRecords}
+                exitingRecordIds={exitingRecordIds}
+                onDelete={handleDelete}
+                onEdit={handleEdit}
+                onOpenDetail={setInspectingRecord}
+                onVisit={handleVisit}
+              />
+            ) : selectedViewMode === "visited" ? (
+              <ArchivedRecordsBoard records={archivedRecords} onDelete={handleDelete} onEdit={handleEdit} />
+            ) : boardRecords.length > 0 ? (
+              <BoardNoteGrid
+                records={boardRecords}
+                exitingRecordIds={exitingRecordIds}
+                onDelete={handleDelete}
+                onEdit={handleEdit}
+                onOpenDetail={setInspectingRecord}
+                onVisit={handleVisit}
+              />
             ) : (
               <div className="empty-board">
                 <Search size={34} aria-hidden />
-                <h2>还没有待销的小票</h2>
+                <h2>还没有待打卡的小票</h2>
                 <p>粘贴一条美食笔记，确认解析结果后就会钉到今天的板块里。</p>
               </div>
             )}
@@ -334,10 +643,10 @@ export default function Home() {
         </section>
 
         <aside className="tool-rail" aria-label="右侧记录和筛选工具栏">
-          <form className="capture-card" onSubmit={handleExtract}>
+          <form className="capture-card" onPaste={handleImagePaste} onSubmit={handleExtract}>
             <div className="card-heading">
               <WandSparkles size={20} aria-hidden />
-              <h2>解析记录</h2>
+              <h2>AI 整理想吃的店</h2>
             </div>
             <label>
               <span>
@@ -346,12 +655,86 @@ export default function Home() {
               </span>
               <input
                 value={sourceUrl}
-                onChange={(event) => setSourceUrl(event.target.value)}
-                placeholder="粘贴小红书笔记链接"
+                onChange={(event) => {
+                  setSourceUrl(event.target.value);
+                  setAiExtractNotice("");
+                }}
+                placeholder="可选，只作为来源备注保存"
                 inputMode="url"
                 type="text"
               />
             </label>
+            <div
+              className={`image-parser ${isImageDropActive ? "is-active" : ""} ${isImageParsing ? "is-loading" : ""}`}
+              onDragLeave={handleImageDragLeave}
+              onDragOver={handleImageDragOver}
+              onDrop={handleImageDrop}
+              onKeyDown={handleImageAreaKeyDown}
+              onPaste={handleImagePaste}
+              tabIndex={0}
+            >
+              <input
+                accept="image/*"
+                aria-label="选择店铺截图"
+                className="visually-hidden-input"
+                onChange={handleImageInputChange}
+                ref={fileInputRef}
+                type="file"
+              />
+              <div className="image-parser-main">
+                <div className="image-parser-icon">
+                  <ImagePlus size={22} aria-hidden />
+                </div>
+                 <div>
+                  <span>图片直传模型理解</span>
+                  <p>本地选择、拖进来，或直接粘贴截图；只压缩图片，不做本地 OCR。</p>
+                </div>
+              </div>
+              <div className="image-parser-actions">
+                <button
+                  className="mini-button"
+                  disabled={isImageParsing}
+                  onClick={() => fileInputRef.current?.click()}
+                  type="button"
+                >
+                  <FileImage size={15} aria-hidden />
+                  本地选择
+                </button>
+                <span>
+                  <ClipboardPaste size={14} aria-hidden />
+                  支持复制粘贴
+                </span>
+              </div>
+              {imagePreviewUrl ? (
+                <div className="image-preview">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img alt="待识别店铺截图预览" src={imagePreviewUrl} />
+                  <div>
+                    <strong>{imageFileName || "店铺截图"}</strong>
+                    <span>
+                      {isImageParsing
+                        ? imageParseStatus || "正在准备图片"
+                        : imageModelInput
+                          ? "图片已准备好"
+                          : "等待准备"}
+                    </span>
+                  </div>
+                  <button aria-label="清除图片" onClick={clearImageParse} type="button">
+                    <X size={14} aria-hidden />
+                  </button>
+                </div>
+              ) : null}
+              {isImageParsing ? (
+                <div className="image-progress" aria-live="polite">
+                  <div>
+                    <LoaderCircle className="spin-icon" size={14} aria-hidden />
+                    <span>{imageParseStatus || "正在准备图片"}</span>
+                  </div>
+                  <i style={{ width: `${Math.round(imageParseProgress * 100)}%` }} />
+                </div>
+              ) : null}
+              {imageParseError ? <p className="image-parser-error">{imageParseError}</p> : null}
+            </div>
             <label>
               <span>
                 <ClipboardPenLine size={16} aria-hidden />
@@ -359,14 +742,26 @@ export default function Home() {
               </span>
               <textarea
                 value={rawText}
-                onChange={(event) => setRawText(event.target.value)}
-                placeholder="粘贴标题、正文、地址、人均、推荐菜等内容"
+                onChange={(event) => {
+                  setRawText(event.target.value);
+                  setAiExtractNotice("");
+                }}
+                placeholder="粘贴小红书文案、群聊片段，或者随手写下想吃的店。不用填很完整，饭签会先帮你整理成一张小票草稿。"
                 rows={5}
               />
             </label>
-            <button className="primary-button" type="submit" disabled={!sourceUrl.trim() && !rawText.trim()}>
-              <Plus size={18} aria-hidden />
-              记录
+            {aiExtractNotice ? (
+              <p className="ai-extract-notice" aria-live="polite">
+                {aiExtractNotice}
+              </p>
+            ) : null}
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={isCaptureBusy || (!sourceUrl.trim() && !rawText.trim() && !imageModelInput)}
+            >
+              {isCaptureBusy ? <LoaderCircle className="spin-icon" size={18} aria-hidden /> : <Plus size={18} aria-hidden />}
+              {isImageParsing ? "图片准备中" : isAiExtracting ? "AI 整理中" : "AI 整理成小票"}
             </button>
           </form>
 
@@ -375,32 +770,20 @@ export default function Home() {
               <Filter size={20} aria-hidden />
               <h2>筛选</h2>
             </div>
+            <OptionFilterGroup
+              label="查看范围"
+              options={VIEW_MODE_FILTERS}
+              selected={selectedViewMode}
+              onSelect={setSelectedViewMode}
+            />
             <FilterGroup label="店铺类型" values={shopTypes} selected={selectedType} onSelect={setSelectedType} />
+            <OptionFilterGroup
+              label="地点范围"
+              options={LOCATION_SCOPE_FILTERS}
+              selected={selectedLocationScope}
+              onSelect={setSelectedLocationScope}
+            />
             <FilterGroup label="地点" values={locations} selected={selectedLocation} onSelect={setSelectedLocation} />
-            <div className="filter-group">
-              <p>附近距离</p>
-              <div className="chip-row">
-                {DISTANCE_FILTERS.map((filter) => (
-                  <button
-                    className={`chip ${selectedDistance === filter.value ? "is-active" : ""}`}
-                    key={filter.value}
-                    onClick={() => setSelectedDistance(filter.value)}
-                    type="button"
-                  >
-                    {filter.label}
-                  </button>
-                ))}
-              </div>
-              {selectedDistance === "custom" ? (
-                <input
-                  className="compact-input"
-                  inputMode="numeric"
-                  onChange={(event) => setCustomDistance(event.target.value)}
-                  placeholder="输入距离（米）"
-                  value={customDistance}
-                />
-              ) : null}
-            </div>
             <div className="filter-group">
               <p>记录时间</p>
               <div className="chip-row">
@@ -439,7 +822,14 @@ export default function Home() {
             </button>
           </section>
 
-          <ArchiveFolder records={archivedRecords} onDelete={handleDelete} onEdit={handleEdit} />
+          <FoodStats
+            archivedTotal={archivedTotal}
+            recentVisitedRecords={recentVisitedRecords}
+            revisitTotal={revisitTotal}
+            total={records.length}
+            wantTotal={wantTotal}
+            onViewArchive={() => setSelectedViewMode("visited")}
+          />
         </aside>
       </div>
 
@@ -454,8 +844,163 @@ export default function Home() {
           onSave={handleSaveDraft}
         />
       ) : null}
+
+      {inspectingRecord ? (
+        <RecordDetailDialog
+          record={inspectingRecord}
+          onClose={() => setInspectingRecord(null)}
+          onDelete={handleDelete}
+          onEdit={handleEdit}
+        />
+      ) : null}
     </main>
   );
+}
+
+function getFirstImageFile(files: FileList | null) {
+  return Array.from(files ?? []).find(isImageFile) ?? null;
+}
+
+function getFirstImageItemFile(items: DataTransferItemList) {
+  const imageItem = Array.from(items).find((item) => item.kind === "file" && item.type.startsWith("image/"));
+  return imageItem?.getAsFile() ?? null;
+}
+
+function hasImageFile(items: DataTransferItemList) {
+  return Array.from(items).some((item) => item.kind === "file" && item.type.startsWith("image/"));
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/");
+}
+
+async function prepareImageForModel(file: File): Promise<ModelImageInput | null> {
+  const primary = await prepareImageVariant(file, {
+    label: "primary",
+    maxEdge: MAX_MODEL_IMAGE_EDGE,
+    maxPixels: MAX_MODEL_IMAGE_PIXELS,
+    quality: MODEL_IMAGE_QUALITY
+  });
+
+  if (!primary) return null;
+
+  const compact = await prepareImageVariant(file, {
+    label: "compact",
+    maxEdge: FALLBACK_MODEL_IMAGE_EDGE,
+    maxPixels: FALLBACK_MODEL_IMAGE_PIXELS,
+    quality: FALLBACK_MODEL_IMAGE_QUALITY
+  });
+
+  return {
+    ...primary,
+    variants: compact && compact.data !== primary.data ? [compact] : []
+  };
+}
+
+async function prepareImageVariant(
+  file: File,
+  options: {
+    label: string;
+    maxEdge: number;
+    maxPixels: number;
+    quality: number;
+  }
+): Promise<ModelImageVariant | null> {
+  const blob = await resizeImage(file, options);
+  const target = blob ?? file;
+  const data = await blobToBase64Data(target);
+
+  if (!data || data.length > MAX_MODEL_IMAGE_BASE64_CHARS) return null;
+
+  return {
+    data,
+    label: options.label,
+    mediaType: target.type || "image/jpeg"
+  };
+}
+
+async function resizeImage(
+  file: File,
+  {
+    maxEdge,
+    maxPixels,
+    quality
+  }: {
+    maxEdge: number;
+    maxPixels: number;
+    quality: number;
+  }
+) {
+  if (typeof createImageBitmap !== "function") return null;
+
+  let bitmap: ImageBitmap;
+
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return null;
+  }
+
+  try {
+    const scale = Math.min(
+      1,
+      maxEdge / Math.max(bitmap.width, bitmap.height),
+      Math.sqrt(maxPixels / (bitmap.width * bitmap.height))
+    );
+
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return null;
+
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", quality);
+    });
+
+    return blob;
+  } finally {
+    bitmap.close();
+  }
+}
+
+function blobToBase64Data(blob: Blob) {
+  return new Promise<string>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(blob);
+  });
+}
+
+function clampText(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, maxLength).trimEnd();
+}
+
+function formatFileSize(bytes: number) {
+  const megabytes = bytes / 1024 / 1024;
+  return `${megabytes.toFixed(megabytes >= 10 ? 0 : 1)}MB`;
+}
+
+function getImagePrepareErrorMessage(error: unknown) {
+  if (error instanceof Error) return `图片准备失败：${error.message}`;
+  return "图片准备失败，请换一张截图再试。";
+}
+
+function getAiExtractErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  return "AI 整理失败";
 }
 
 function FilterGroup({
@@ -488,6 +1033,262 @@ function FilterGroup({
   );
 }
 
+function OptionFilterGroup<T extends string>({
+  label,
+  options,
+  selected,
+  onSelect
+}: {
+  label: string;
+  options: readonly { label: string; value: T }[];
+  selected: T;
+  onSelect: (value: T) => void;
+}) {
+  return (
+    <div className="filter-group">
+      <p>{label}</p>
+      <div className="chip-row">
+        {options.map((option) => (
+          <button
+            className={`chip ${selected === option.value ? "is-active" : ""}`}
+            key={option.value || option.label}
+            onClick={() => onSelect(option.value)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BoardNoteGrid({
+  records,
+  exitingRecordIds,
+  onEdit,
+  onDelete,
+  onOpenDetail,
+  onVisit
+}: {
+  records: FoodRecord[];
+  exitingRecordIds: string[];
+  onEdit: (record: FoodRecord) => void;
+  onDelete: (id: string) => void;
+  onOpenDetail: (record: FoodRecord) => void;
+  onVisit: (record: FoodRecord) => void;
+}) {
+  return (
+    <div className="board-note-grid">
+      {records.map((record, index) => (
+        <FoodNote
+          colorClass={NOTE_COLORS[index % NOTE_COLORS.length]}
+          fixtureType={getFixtureType(index)}
+          key={record.id}
+          record={record}
+          isExiting={exitingRecordIds.includes(record.id)}
+          shiftX={getShiftX(index)}
+          shiftY={getShiftY(index)}
+          stack={getStack(index)}
+          tilt={getTilt(index)}
+          onDelete={onDelete}
+          onEdit={onEdit}
+          onOpenDetail={onOpenDetail}
+          onVisit={onVisit}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AllRecordsBoard({
+  archivedRecords,
+  boardRecords,
+  exitingRecordIds,
+  onEdit,
+  onDelete,
+  onOpenDetail,
+  onVisit
+}: {
+  archivedRecords: FoodRecord[];
+  boardRecords: FoodRecord[];
+  exitingRecordIds: string[];
+  onEdit: (record: FoodRecord) => void;
+  onDelete: (id: string) => void;
+  onOpenDetail: (record: FoodRecord) => void;
+  onVisit: (record: FoodRecord) => void;
+}) {
+  return (
+    <div className="all-records-board">
+      <section className="record-section">
+        <div className="record-section-heading">
+          <div>
+            <p className="eyebrow">WANT TO GO</p>
+            <h3>待打卡墙</h3>
+          </div>
+          <span>{boardRecords.length} 家</span>
+        </div>
+        {boardRecords.length > 0 ? (
+          <BoardNoteGrid
+            records={boardRecords}
+            exitingRecordIds={exitingRecordIds}
+            onDelete={onDelete}
+            onEdit={onEdit}
+            onOpenDetail={onOpenDetail}
+            onVisit={onVisit}
+          />
+        ) : (
+          <EmptyState title="还没有待打卡的小票" description="粘贴一条美食笔记，确认解析结果后就会贴到这里。" />
+        )}
+      </section>
+
+      <section className="record-section archive-record-section">
+        <div className="record-section-heading">
+          <div>
+            <p className="eyebrow">CHECKED RECEIPTS</p>
+            <h3>已打卡列表</h3>
+          </div>
+          <span>{archivedRecords.length} 家</span>
+        </div>
+        <ArchivedRecordsBoard records={archivedRecords} onDelete={onDelete} onEdit={onEdit} />
+      </section>
+    </div>
+  );
+}
+
+function ArchivedRecordsBoard({
+  records,
+  onEdit,
+  onDelete
+}: {
+  records: FoodRecord[];
+  onEdit: (record: FoodRecord) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedRecordId && !records.some((record) => record.id === selectedRecordId)) {
+      setSelectedRecordId(null);
+    }
+  }, [records, selectedRecordId]);
+
+  if (records.length === 0) {
+    return <EmptyState title="还没有已打卡记录" description="吃完后给小票打卡，真实评价会沉淀到这里。" />;
+  }
+
+  const selectedRecord = selectedRecordId ? records.find((record) => record.id === selectedRecordId) : undefined;
+
+  return (
+    <div className="archive-main-list">
+      <div className="archive-table" role="list">
+        <div className="archive-table-header" aria-hidden>
+          <span>店名</span>
+          <span>类型</span>
+          <span>地点</span>
+          <span>打卡</span>
+        </div>
+        {records.map((record) => (
+          <div className="archive-row-group" key={record.id} role="listitem">
+            <button
+              aria-expanded={selectedRecord?.id === record.id}
+              className={`archive-table-row ${selectedRecord?.id === record.id ? "is-selected" : ""}`}
+              onClick={() => setSelectedRecordId((current) => (current === record.id ? null : record.id))}
+              type="button"
+            >
+              <span>{record.shopName || "未命名店铺"}</span>
+              <span>{record.shopType || "未分类"}</span>
+              <span>{formatLocationSummary(record)}</span>
+              <span>
+                {record.visitedAt ? formatShortDate(record.visitedAt) : "已打卡"}
+                {record.rating ? ` · ${record.rating}/5` : ""}
+              </span>
+            </button>
+            {selectedRecord?.id === record.id ? (
+              <ArchiveDetail
+                className="archive-inline-detail"
+                record={record}
+                onDelete={onDelete}
+                onEdit={onEdit}
+              />
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="empty-board">
+      <Search size={34} aria-hidden />
+      <h2>{title}</h2>
+      <p>{description}</p>
+    </div>
+  );
+}
+
+function FoodStats({
+  archivedTotal,
+  recentVisitedRecords,
+  revisitTotal,
+  total,
+  wantTotal,
+  onViewArchive
+}: {
+  archivedTotal: number;
+  recentVisitedRecords: FoodRecord[];
+  revisitTotal: number;
+  total: number;
+  wantTotal: number;
+  onViewArchive: () => void;
+}) {
+  return (
+    <section className="stats-card" aria-label="饭签统计">
+      <div className="card-heading">
+        <CircleDot size={20} aria-hidden />
+        <h2>饭签统计</h2>
+      </div>
+      <dl className="stats-list">
+        <div>
+          <dt>全部</dt>
+          <dd>{total} 家</dd>
+        </div>
+        <div>
+          <dt>待打卡</dt>
+          <dd>{wantTotal} 家</dd>
+        </div>
+        <div>
+          <dt>已打卡</dt>
+          <dd>{archivedTotal} 家</dd>
+        </div>
+        <div>
+          <dt>可二刷</dt>
+          <dd>{revisitTotal} 家</dd>
+        </div>
+      </dl>
+
+      <div className="recent-visited">
+        <p>最近打卡</p>
+        {recentVisitedRecords.length > 0 ? (
+          recentVisitedRecords.map((record) => (
+            <span key={record.id}>
+              {record.shopName || "未命名店铺"}｜{record.rating ? record.rating : "未评分"}
+            </span>
+          ))
+        ) : (
+          <span>还没有打卡记录</span>
+        )}
+      </div>
+
+      <button className="ghost-button" onClick={onViewArchive} type="button">
+        查看全部归档
+      </button>
+    </section>
+  );
+}
+
 function FoodNote({
   record,
   colorClass,
@@ -499,6 +1300,7 @@ function FoodNote({
   tilt,
   onEdit,
   onDelete,
+  onOpenDetail,
   onVisit
 }: {
   record: FoodRecord;
@@ -511,23 +1313,38 @@ function FoodNote({
   tilt: number;
   onEdit: (record: FoodRecord) => void;
   onDelete: (id: string) => void;
+  onOpenDetail: (record: FoodRecord) => void;
   onVisit: (record: FoodRecord) => void;
 }) {
+  function handleKeyboardOpen(event: KeyboardEvent<HTMLElement>) {
+    if (event.currentTarget !== event.target) return;
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onOpenDetail(record);
+    }
+  }
+
   return (
     <article
+      aria-label={`查看${record.shopName || "未命名店铺"}完整信息`}
       className={`food-note ${colorClass} ${isExiting ? "is-exiting" : ""}`}
+      onClick={() => onOpenDetail(record)}
+      onKeyDown={handleKeyboardOpen}
+      role="button"
       style={
         {
           "--shift-x": `${shiftX}px`,
           "--shift-y": `${shiftY}px`,
           "--stack": stack,
           "--tilt": `${tilt}deg`
-        } as React.CSSProperties
+        } as CSSProperties
       }
+      tabIndex={0}
     >
       <ReceiptFixture type={fixtureType} />
       <span className="archive-stroke" aria-hidden />
-      <div className="note-actions">
+      <div className="note-actions" onClick={(event) => event.stopPropagation()}>
         <button aria-label="编辑" onClick={() => onEdit(record)} type="button">
           <Pencil size={15} aria-hidden />
         </button>
@@ -559,7 +1376,7 @@ function FoodNote({
           <span>PLACE</span>
           <strong>
             <MapPin size={13} aria-hidden />
-            {record.location || "待补充"}
+            {formatLocationSummary(record)}
           </strong>
         </div>
         <div>
@@ -576,6 +1393,7 @@ function FoodNote({
         <p className="dish-line">ITEMS / {record.recommendedDishes.join(" + ")}</p>
       ) : null}
       {record.intro ? <p className="intro-line">{record.intro}</p> : null}
+      {record.sourceUrl ? <p className="source-line">SOURCE / 小红书链接</p> : null}
 
       {record.customTags.length > 0 ? (
         <div className="tag-list">
@@ -592,9 +1410,18 @@ function FoodNote({
             {record.visitedAt ? ` · ${formatShortDate(record.visitedAt)}` : ""}
           </span>
           {record.visitNote ? <p>{record.visitNote}</p> : null}
+          {record.avoidNotes ? <p>避雷：{record.avoidNotes}</p> : null}
+          {record.revisitWish ? <p>二刷：{formatRevisitWish(record.revisitWish)}</p> : null}
         </div>
       ) : (
-        <button className="visit-button" onClick={() => onVisit(record)} type="button">
+        <button
+          className="visit-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onVisit(record);
+          }}
+          type="button"
+        >
           <CheckCircle2 size={16} aria-hidden />
           标记已打卡
         </button>
@@ -620,155 +1447,248 @@ function ReceiptFixture({ type }: { type: FixtureType }) {
   return <span className={`receipt-fixture fixture-${type}`} aria-hidden />;
 }
 
-function ArchiveFolder({
-  records,
-  onEdit,
-  onDelete
+function ArchiveDetail({
+  className = "",
+  record,
+  onDelete,
+  onEdit
 }: {
-  records: FoodRecord[];
-  onEdit: (record: FoodRecord) => void;
+  className?: string;
+  record: FoodRecord;
   onDelete: (id: string) => void;
+  onEdit: (record: FoodRecord) => void;
 }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (records.length === 0) {
-      setSelectedRecordId(null);
-      return;
-    }
-
-    if (!selectedRecordId || !records.some((record) => record.id === selectedRecordId)) {
-      setSelectedRecordId(records[0].id);
-    }
-  }, [records, selectedRecordId]);
-
-  const selectedRecord = records.find((record) => record.id === selectedRecordId) ?? null;
-  const stackedTickets = records.slice(0, 8);
-
   return (
-    <section className={`archive-folder ${isOpen ? "is-open" : ""}`} aria-label="已打卡收藏夹">
-      <button
-        aria-expanded={isOpen}
-        className="folder-cover"
-        onClick={() => setIsOpen((current) => !current)}
-        type="button"
-      >
-        <span className="folder-title">已打卡收藏夹</span>
-        <span className="folder-subtitle">CHECKED RECEIPTS</span>
-        <span className="folder-ticket-stack" aria-hidden>
-          {stackedTickets.map((record, index) => (
-            <i
-              key={record.id}
-              style={
-                {
-                  "--ticket-bottom": `${index * 3}px`,
-                  "--ticket-left": `${index * 13}px`,
-                  "--ticket-rotate": `${-8 + index * 2}deg`
-                } as React.CSSProperties
-              }
-            />
-          ))}
-        </span>
-        <strong>{records.length}</strong>
-      </button>
-
-      {isOpen ? (
-        <div className="folder-panel">
-          {records.length > 0 ? (
-            <>
-              <div className="archive-list">
-                {records.map((record) => (
-                  <button
-                    className={`archive-item ${selectedRecordId === record.id ? "is-selected" : ""}`}
-                    key={record.id}
-                    onClick={() => setSelectedRecordId(record.id)}
-                    type="button"
-                  >
-                    <span>{record.shopName || "未命名店铺"}</span>
-                    <small>
-                      {record.visitedAt ? formatShortDate(record.visitedAt) : "已打卡"}
-                      {record.rating ? ` · ${record.rating}/5` : ""}
-                    </small>
-                  </button>
-                ))}
-              </div>
-
-              {selectedRecord ? (
-                <article className="archive-detail">
-                  <p className="receipt-id">NO. {selectedRecord.id.slice(0, 8).toUpperCase()}</p>
-                  <h3>{selectedRecord.shopName || "未命名店铺"}</h3>
-                  <dl>
-                    <div>
-                      <dt>类型</dt>
-                      <dd>{selectedRecord.shopType || "未分类"}</dd>
-                    </div>
-                    <div>
-                      <dt>地点</dt>
-                      <dd>{selectedRecord.location || "待补充"}</dd>
-                    </div>
-                    <div>
-                      <dt>人均</dt>
-                      <dd>{selectedRecord.avgPrice || "--"}</dd>
-                    </div>
-                    <div>
-                      <dt>打卡</dt>
-                      <dd>
-                        {selectedRecord.visitedAt ? formatShortDate(selectedRecord.visitedAt) : "已打卡"}
-                        {selectedRecord.rating ? ` · ${selectedRecord.rating}/5` : ""}
-                      </dd>
-                    </div>
-                  </dl>
-                  {selectedRecord.recommendedDishes.length > 0 ? (
-                    <p className="archive-detail-line">推荐：{selectedRecord.recommendedDishes.join("、")}</p>
-                  ) : null}
-                  {selectedRecord.visitNote ? <p className="archive-detail-note">{selectedRecord.visitNote}</p> : null}
-                  <div className="archive-actions">
-                    <button onClick={() => onEdit(selectedRecord)} type="button">
-                      <Pencil size={14} aria-hidden />
-                      编辑
-                    </button>
-                    <button onClick={() => onDelete(selectedRecord.id)} type="button">
-                      <Trash2 size={14} aria-hidden />
-                      删除
-                    </button>
-                  </div>
-                </article>
-              ) : null}
-            </>
-          ) : (
-            <p className="archive-empty">打卡后的小票会收进这里。</p>
-          )}
+    <article className={`archive-detail archive-full-detail ${className}`.trim()}>
+      <p className="receipt-id">NO. {record.id.slice(0, 8).toUpperCase()}</p>
+      <h3>{record.shopName || "未命名店铺"}</h3>
+      <dl>
+        <div>
+          <dt>状态</dt>
+          <dd>{record.status === "visited" ? "已打卡" : "待打卡"}</dd>
         </div>
-      ) : null}
-    </section>
+        <div>
+          <dt>类型</dt>
+          <dd>{record.shopType || "未分类"}</dd>
+        </div>
+        <div>
+          <dt>范围</dt>
+          <dd>{formatLocationScope(record.locationScope)}</dd>
+        </div>
+        <div>
+          <dt>地点</dt>
+          <dd>{record.location || "地点待补充"}</dd>
+        </div>
+        <div>
+          <dt>人均</dt>
+          <dd>{record.avgPrice || "--"}</dd>
+        </div>
+        <div>
+          <dt>推荐</dt>
+          <dd>{record.recommendedDishes.length > 0 ? record.recommendedDishes.join("、") : "未填写"}</dd>
+        </div>
+        <div>
+          <dt>标签</dt>
+          <dd>{record.customTags.length > 0 ? record.customTags.map((tag) => `#${tag}`).join(" ") : "未填写"}</dd>
+        </div>
+        <div>
+          <dt>来源</dt>
+          <dd>
+            {record.sourceUrl ? (
+              <a href={record.sourceUrl} rel="noreferrer" target="_blank">
+                {record.sourceUrl}
+              </a>
+            ) : (
+              "未填写"
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>加入</dt>
+          <dd>{formatReceiptTimestamp(record.createdAt)}</dd>
+        </div>
+        <div>
+          <dt>更新</dt>
+          <dd>{formatReceiptTimestamp(record.updatedAt)}</dd>
+        </div>
+        <div>
+          <dt>打卡</dt>
+          <dd>
+            {record.visitedAt ? formatShortDate(record.visitedAt) : "已打卡"}
+            {record.rating ? ` · ${record.rating}/5` : ""}
+          </dd>
+        </div>
+        <div>
+          <dt>二刷</dt>
+          <dd>{record.revisitWish ? formatRevisitWish(record.revisitWish) : "未填写"}</dd>
+        </div>
+      </dl>
+      {record.intro ? <p className="archive-detail-line">备注：{record.intro}</p> : null}
+      {record.visitNote ? <p className="archive-detail-note">评价：{record.visitNote}</p> : null}
+      {record.avoidNotes ? <p className="archive-detail-line">避雷点：{record.avoidNotes}</p> : null}
+      {record.rawText ? <p className="archive-detail-line archive-raw-text">原始文本：{record.rawText}</p> : null}
+      <div className="archive-actions">
+        <button onClick={() => onEdit(record)} type="button">
+          <Pencil size={14} aria-hidden />
+          编辑
+        </button>
+        <button onClick={() => onDelete(record.id)} type="button">
+          <Trash2 size={14} aria-hidden />
+          删除
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function RecordDetailDialog({
+  record,
+  onClose,
+  onDelete,
+  onEdit
+}: {
+  record: FoodRecord;
+  onClose: () => void;
+  onDelete: (id: string) => void;
+  onEdit: (record: FoodRecord) => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <div aria-labelledby="record-detail-title" aria-modal="true" className="draft-dialog detail-dialog" role="dialog">
+        <div className="dialog-title">
+          <div>
+            <p className="eyebrow">RECEIPT DETAIL</p>
+            <h2 id="record-detail-title">完整小票信息</h2>
+          </div>
+          <button aria-label="关闭" className="icon-button" onClick={onClose} type="button">
+            <X size={18} aria-hidden />
+          </button>
+        </div>
+        <ArchiveDetail className="detail-dialog-receipt" record={record} onDelete={onDelete} onEdit={onEdit} />
+      </div>
+    </div>
   );
 }
 
 function applyDraftToRecord(record: FoodRecord, draft: FoodRecordDraft, updatedAt: string): FoodRecord {
   return {
     ...record,
-    ...draft,
+    ...normalizeDraftForSave(draft),
     updatedAt,
-    recommendedDishes: cleanList(draft.recommendedDishes),
-    customTags: cleanList(draft.customTags)
   };
 }
 
-function matchesDistanceFilter(record: FoodRecord, filter: DistanceFilter, customDistance: string) {
-  if (filter === "all") return true;
+function normalizeStoredRecord(record: Partial<FoodRecord>): FoodRecord {
+  const now = new Date().toISOString();
+  const status = normalizeStatus(record.status);
 
-  const requestedMeters =
-    filter === "500m" ? 500 : filter === "1km" ? 1000 : Number.parseInt(customDistance.trim(), 10);
-
-  if (!requestedMeters || requestedMeters <= 0) return true;
-
-  return resolveDistanceToCurrentPlace(record) <= requestedMeters;
+  return {
+    id: record.id || createId(),
+    sourceUrl: record.sourceUrl ?? "",
+    rawText: clampText(record.rawText ?? "", MAX_RAW_TEXT_CHARS),
+    shopName: record.shopName ?? "",
+    shopType: record.shopType ?? "",
+    locationScope: normalizeLocationScope(record.locationScope, `${record.location ?? ""} ${record.rawText ?? ""}`),
+    location: record.location ?? "",
+    avgPrice: record.avgPrice ?? "",
+    recommendedDishes: Array.isArray(record.recommendedDishes) ? cleanList(record.recommendedDishes) : [],
+    intro: record.intro ?? "",
+    customTags: Array.isArray(record.customTags) ? cleanList(record.customTags) : [],
+    status,
+    createdAt: record.createdAt ?? now,
+    updatedAt: record.updatedAt ?? record.createdAt ?? now,
+    visitedAt: status === "visited" ? record.visitedAt : undefined,
+    rating: typeof record.rating === "number" ? record.rating : undefined,
+    visitNote: status === "visited" ? record.visitNote : undefined,
+    avoidNotes: status === "visited" ? record.avoidNotes : undefined,
+    revisitWish: status === "visited" ? normalizeRevisitWish(record.revisitWish) : undefined
+  };
 }
 
-function resolveDistanceToCurrentPlace(_record: FoodRecord) {
-  // Future map API integration point: return distance in meters from the user's current place.
-  return 0;
+function normalizeDraftForSave(draft: FoodRecordDraft): FoodRecordDraft {
+  const isVisited = draft.status === "visited";
+
+  return {
+    ...draft,
+    sourceUrl: draft.sourceUrl.trim(),
+    rawText: clampText(draft.rawText, MAX_RAW_TEXT_CHARS),
+    shopName: draft.shopName.trim(),
+    shopType: draft.shopType.trim(),
+    locationScope: normalizeLocationScope(draft.locationScope),
+    location: draft.location.trim(),
+    avgPrice: draft.avgPrice.trim(),
+    recommendedDishes: cleanList(draft.recommendedDishes),
+    intro: draft.intro.trim(),
+    customTags: cleanList(draft.customTags),
+    visitedAt: isVisited ? draft.visitedAt || toDateInputValue(new Date()) : undefined,
+    rating: isVisited ? draft.rating : undefined,
+    visitNote: isVisited ? draft.visitNote?.trim() : undefined,
+    avoidNotes: isVisited ? draft.avoidNotes?.trim() : undefined,
+    revisitWish: isVisited ? normalizeRevisitWish(draft.revisitWish) : undefined
+  };
+}
+
+function normalizeStatus(value: unknown): FoodRecordStatus {
+  return value === "visited" ? "visited" : "want";
+}
+
+function normalizeLocationScope(value: unknown, source = ""): FoodRecordLocationScope {
+  if (value === "nearby" || value === "附近随吃") return "nearby";
+  if (value === "destination" || value === "专门出门") return "destination";
+
+  if (/专门|特意|出门|周末|打车|地铁|商圈|体育西|东山口|北京路|珠江新城|客村|江南西|天河|海珠|越秀/i.test(source)) {
+    return "destination";
+  }
+
+  if (/附近|顺路|下课|课后|学校|宿舍|大学城|南亭|北亭|gogo|穗石/i.test(source)) {
+    return "nearby";
+  }
+
+  return "";
+}
+
+function normalizeRevisitWish(value: unknown): FoodRecordRevisitWish {
+  if (value === "yes" || value === "maybe" || value === "no") return value;
+  if (value === "想二刷") return "yes";
+  if (value === "看情况") return "maybe";
+  if (value === "不二刷") return "no";
+  return "";
+}
+
+function formatLocationScope(value: FoodRecordLocationScope | undefined) {
+  return LOCATION_SCOPE_LABELS[normalizeLocationScope(value)];
+}
+
+function formatLocationSummary(record: FoodRecord) {
+  const location = record.location || "地点待补充";
+  return record.locationScope ? `${formatLocationScope(record.locationScope)} - ${location}` : location;
+}
+
+function formatRevisitWish(value: FoodRecordRevisitWish | undefined) {
+  return REVISIT_WISH_LABELS[normalizeRevisitWish(value)];
+}
+
+function matchesSearchQuery(record: FoodRecord, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+
+  return [
+    record.shopName,
+    record.shopType,
+    formatLocationScope(record.locationScope),
+    record.location,
+    record.avgPrice,
+    record.recommendedDishes.join(" "),
+    record.customTags.join(" "),
+    record.intro,
+    record.visitNote,
+    record.avoidNotes,
+    record.revisitWish ? formatRevisitWish(record.revisitWish) : "",
+    record.sourceUrl,
+    record.rawText
+  ]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value.toLowerCase().includes(normalizedQuery));
 }
 
 function matchesTimeFilter(value: string, filter: TimeFilter, customStart: string, customEnd: string) {
@@ -837,7 +1757,9 @@ function DraftDialog({
       customTags: splitList(tagText),
       visitedAt: localDraft.status === "visited" ? localDraft.visitedAt || toDateInputValue(new Date()) : undefined,
       rating: localDraft.status === "visited" ? localDraft.rating : undefined,
-      visitNote: localDraft.status === "visited" ? localDraft.visitNote : undefined
+      visitNote: localDraft.status === "visited" ? localDraft.visitNote : undefined,
+      avoidNotes: localDraft.status === "visited" ? localDraft.avoidNotes : undefined,
+      revisitWish: localDraft.status === "visited" ? localDraft.revisitWish : undefined
     });
   }
 
@@ -847,7 +1769,7 @@ function DraftDialog({
         <div className="dialog-title">
           <div>
             <p className="eyebrow">{isEditing ? "EDIT NOTE" : "PARSE PREVIEW"}</p>
-            <h2>{isEditing ? "编辑便利贴" : "确认解析结果"}</h2>
+            <h2>{isEditing ? "编辑便利贴" : "AI 已帮你整理出一张待打卡小票"}</h2>
           </div>
           <button aria-label="关闭" className="icon-button" onClick={onClose} type="button">
             <X size={18} aria-hidden />
@@ -871,12 +1793,27 @@ function DraftDialog({
               placeholder="例如：火锅、咖啡、甜品"
             />
           </label>
+          <div className="field-control">
+            <span>地点范围</span>
+            <div className="segmented scope-segmented">
+              {LOCATION_SCOPE_OPTIONS.map((option) => (
+                <button
+                  className={localDraft.locationScope === option.value ? "is-active" : ""}
+                  key={option.value || option.label}
+                  onClick={() => updateField("locationScope", option.value)}
+                  type="button"
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <label>
-            <span>位置</span>
+            <span>地点名称</span>
             <input
               value={localDraft.location}
               onChange={(event) => updateField("location", event.target.value)}
-              placeholder="区域、商圈或详细地址"
+              placeholder="例如：南亭、GOGO、体育西"
             />
           </label>
           <label>
@@ -904,6 +1841,14 @@ function DraftDialog({
             onChange={(event) => updateField("intro", event.target.value)}
             rows={3}
             placeholder="这家店吸引你的地方"
+          />
+        </label>
+        <label>
+          <span>来源链接 / 备注</span>
+          <input
+            value={localDraft.sourceUrl}
+            onChange={(event) => updateField("sourceUrl", event.target.value)}
+            placeholder="小红书链接、群聊来源或朋友推荐"
           />
         </label>
 
@@ -949,7 +1894,7 @@ function DraftDialog({
               />
             </label>
             <label className="full-span">
-              <span>体验备注</span>
+              <span>评价</span>
               <textarea
                 rows={3}
                 value={localDraft.visitNote ?? ""}
@@ -957,6 +1902,30 @@ function DraftDialog({
                 placeholder="一句话记录味道、环境或是否想二刷"
               />
             </label>
+            <label className="full-span">
+              <span>避雷点</span>
+              <textarea
+                rows={2}
+                value={localDraft.avoidNotes ?? ""}
+                onChange={(event) => updateField("avoidNotes", event.target.value)}
+                placeholder="不好吃、排队久、踩雷菜品等可以留空"
+              />
+            </label>
+            <div className="field-control full-span">
+              <span>二刷意愿</span>
+              <div className="segmented revisit-segmented">
+                {REVISIT_WISH_OPTIONS.map((option) => (
+                  <button
+                    className={localDraft.revisitWish === option.value ? "is-active" : ""}
+                    key={option.value}
+                    onClick={() => updateField("revisitWish", option.value)}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         ) : null}
 
@@ -966,7 +1935,7 @@ function DraftDialog({
           </button>
           <button className="primary-button" type="submit">
             <Save size={17} aria-hidden />
-            保存便利贴
+            {isEditing ? "保存便利贴" : "加入待打卡墙"}
           </button>
         </div>
       </form>
