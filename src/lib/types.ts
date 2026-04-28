@@ -1,4 +1,6 @@
 export type FoodRecordStatus = "want" | "visited";
+export type FoodRecordLocationScope = "" | "nearby" | "destination";
+export type FoodRecordRevisitWish = "" | "yes" | "maybe" | "no";
 
 export type FoodRecord = {
   id: string;
@@ -6,6 +8,7 @@ export type FoodRecord = {
   rawText: string;
   shopName: string;
   shopType: string;
+  locationScope: FoodRecordLocationScope;
   location: string;
   avgPrice: string;
   recommendedDishes: string[];
@@ -17,6 +20,8 @@ export type FoodRecord = {
   visitedAt?: string;
   rating?: number;
   visitNote?: string;
+  avoidNotes?: string;
+  revisitWish?: FoodRecordRevisitWish;
 };
 
 export type ExtractFoodNoteInput = {
@@ -30,6 +35,7 @@ export type ExtractedFoodNote = Pick<
   | "rawText"
   | "shopName"
   | "shopType"
+  | "locationScope"
   | "location"
   | "avgPrice"
   | "recommendedDishes"
@@ -42,4 +48,6 @@ export type FoodRecordDraft = ExtractedFoodNote & {
   visitedAt?: string;
   rating?: number;
   visitNote?: string;
+  avoidNotes?: string;
+  revisitWish?: FoodRecordRevisitWish;
 };
