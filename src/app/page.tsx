@@ -563,7 +563,7 @@ export default function Home() {
           </div>
           <div>
             <p className="eyebrow">XHS FOOD BOARD</p>
-            <h1>想吃便利贴墙</h1>
+            <h1>饭签</h1>
             <p className="handwritten-line">把刷到的美食，变成一张待打卡小票贴起来吧！</p>
           </div>
         </div>
